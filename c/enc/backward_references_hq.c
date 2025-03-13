@@ -564,21 +564,34 @@ static size_t UpdateNodes(
            to this distance. If the distance refers to the static dictionary, or
            the maximum length is long enough, try only one maximum length. */
         max_match_len = BackwardMatchLength(&match);
-        if (len < max_match_len &&
-            (is_dictionary_match || max_match_len > max_zopfli_len)) {
-          len = max_match_len;
-        }
-        for (; len <= max_match_len; ++len) {
-          const size_t len_code =
-              is_dictionary_match ? BackwardMatchLengthCode(&match) : len;
+        if (is_dictionary_match)
+        {
+          const size_t len_code = BackwardMatchLengthCode(&match);
           const uint16_t copycode = GetCopyLengthCode(len_code);
           const uint16_t cmdcode = CombineLengthCodes(inscode, copycode, 0);
           const float cost = dist_cost + (float)GetCopyExtra(copycode) +
               ZopfliCostModelGetCommandCost(model, cmdcode);
-          if (cost < nodes[pos + len].u.cost) {
-            UpdateZopfliNode(nodes, pos, start, len, len_code, dist, 0, cost);
-            result = BROTLI_MAX(size_t, result, len);
+          if (cost < nodes[pos + max_match_len].u.cost) {
+            UpdateZopfliNode(nodes, pos, start, max_match_len, len_code, dist, 0, cost);
+            result = BROTLI_MAX(size_t, result, max_match_len);
           }
+        }
+        else if (len <= max_match_len)
+        {
+          if (max_match_len > max_zopfli_len)
+            len = max_match_len;
+          do
+          {
+            const uint16_t copycode = GetCopyLengthCode(len);
+            const uint16_t cmdcode = CombineLengthCodes(inscode, copycode, 0);
+            const float cost = dist_cost + (float)GetCopyExtra(copycode) +
+                ZopfliCostModelGetCommandCost(model, cmdcode);
+            if (cost < nodes[pos + len].u.cost) {
+              UpdateZopfliNode(nodes, pos, start, len, len, dist, 0, cost);
+              result = BROTLI_MAX(size_t, result, len);
+            }
+          }
+          while (++len <= max_match_len);
         }
       }
     }
