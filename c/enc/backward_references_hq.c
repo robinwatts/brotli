@@ -259,15 +259,22 @@ static BROTLI_INLINE float ZopfliCostModelGetMinCostCmd(
 /* REQUIRES: len >= 2, start_pos <= pos */
 /* REQUIRES: cost < kInfinity, nodes[start_pos].cost < kInfinity */
 /* Maintains the "ZopfliNode array invariant". */
-static BROTLI_INLINE void UpdateZopfliNode(ZopfliNode* nodes, size_t pos,
-    size_t start_pos, size_t len, size_t len_code, size_t dist,
-    size_t short_code, float cost) {
+static BROTLI_INLINE int UpdateZopfliNode(ZopfliNode* nodes, size_t pos,
+    uint32_t dil, size_t len, size_t len_code, size_t dist,
+    float cost) {
   ZopfliNode* next = &nodes[pos + len];
+  if (cost >= next->u.cost)
+    return 0;
   next->length = (uint32_t)(len | ((len + 9u - len_code) << 25));
   next->distance = (uint32_t)dist;
-  next->dcode_insert_length = (uint32_t)(
-      (short_code << 27) | (pos - start_pos));
+  next->dcode_insert_length = dil;
   next->u.cost = cost;
+  return 1;
+}
+
+static BROTLI_INLINE int UpdateZopfliDIL(size_t pos, size_t start_pos, size_t short_code)
+{
+  return (uint32_t)((short_code << 27) | (pos - start_pos));
 }
 
 typedef struct PosData {
@@ -412,6 +419,27 @@ static void EvaluateNode(
   }
 }
 
+static int stats_inited;
+static int freq[256];
+
+static void dump_stats(void)
+{
+  int i;
+  for (i = 0; i < 256; i++)
+    printf("%d: %d\n", i, freq[i]);
+}
+
+static void stats(int i)
+{
+  if (!stats_inited)
+  {
+    stats_inited = 1;
+    atexit(dump_stats);
+  }
+  if (i >= 0 && i < 256)
+    freq[i]++;
+}
+
 /* Returns longest copy length. */
 static size_t UpdateNodes(
     const size_t num_bytes, const size_t block_start, const size_t pos,
@@ -516,17 +544,35 @@ static size_t UpdateNodes(
         const float dist_cost = base_cost +
             ZopfliCostModelGetDistanceCost(model, j);
         size_t l;
-        for (l = best_len + 1; l <= len; ++l) {
+        uint32_t dil = UpdateZopfliDIL(pos, start, j + 1);
+        l = best_len + 1;
+        if (j == 0 && inscode < 7)
+        {
+          int len8 = len;
+          if (len8 > 9)
+            len8 = 9;
+          for (; l <= len8; ++l) {
+            const uint16_t copycode = l-2;//GetCopyLengthCode(l);
+            const uint16_t cmdcode = (uint16_t)((copycode) | ((inscode) << 3u));
+                //CombineLengthCodes(inscode, copycode, j == 0);
+            const float cost = base_cost +
+                ZopfliCostModelGetCommandCost(model, cmdcode);
+            stats(l);
+            if (UpdateZopfliNode(nodes, pos, dil, l, l, backward, cost))
+              result = BROTLI_MAX(size_t, result, l);
+            best_len = l;
+          }
+        }
+        for (; l <= len; ++l) {
           const uint16_t copycode = GetCopyLengthCode(l);
           const uint16_t cmdcode =
               CombineLengthCodes(inscode, copycode, j == 0);
           const float cost = (cmdcode < 128 ? base_cost : dist_cost) +
               (float)GetCopyExtra(copycode) +
               ZopfliCostModelGetCommandCost(model, cmdcode);
-          if (cost < nodes[pos + l].u.cost) {
-            UpdateZopfliNode(nodes, pos, start, l, l, backward, j + 1, cost);
+          stats(l);
+          if (UpdateZopfliNode(nodes, pos, dil, l, l, backward, cost))
             result = BROTLI_MAX(size_t, result, l);
-          }
           best_len = l;
         }
       }
@@ -540,6 +586,7 @@ static size_t UpdateNodes(
     {
       /* Loop through all possible copy lengths at this position. */
       size_t len = min_len;
+      uint32_t dil = UpdateZopfliDIL(pos, start, 0);
       for (j = 0; j < num_matches; ++j) {
         BackwardMatch match = matches[j];
         size_t dist = match.distance;
@@ -571,10 +618,9 @@ static size_t UpdateNodes(
           const uint16_t cmdcode = CombineLengthCodes(inscode, copycode, 0);
           const float cost = dist_cost + (float)GetCopyExtra(copycode) +
               ZopfliCostModelGetCommandCost(model, cmdcode);
-          if (cost < nodes[pos + max_match_len].u.cost) {
-            UpdateZopfliNode(nodes, pos, start, max_match_len, len_code, dist, 0, cost);
+          stats(len_code);
+          if (UpdateZopfliNode(nodes, pos, dil, max_match_len, len_code, dist, cost))
             result = BROTLI_MAX(size_t, result, max_match_len);
-          }
         }
         else if (len <= max_match_len)
         {
@@ -586,10 +632,9 @@ static size_t UpdateNodes(
             const uint16_t cmdcode = CombineLengthCodes(inscode, copycode, 0);
             const float cost = dist_cost + (float)GetCopyExtra(copycode) +
                 ZopfliCostModelGetCommandCost(model, cmdcode);
-            if (cost < nodes[pos + len].u.cost) {
-              UpdateZopfliNode(nodes, pos, start, len, len, dist, 0, cost);
+            stats(len);
+            if (UpdateZopfliNode(nodes, pos, dil, len, len, dist, cost))
               result = BROTLI_MAX(size_t, result, len);
-            }
           }
           while (++len <= max_match_len);
         }
